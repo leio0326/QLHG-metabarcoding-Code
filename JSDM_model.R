@@ -1,0 +1,110 @@
+# =========================
+# sjSDM pipeline for 6 months
+# =========================
+
+setwd("E:/ecology/20251103/sjsdm/20250105/")
+
+library(readxl)
+library(tidyverse)
+library(sjSDM)
+library(conflicted)
+library(reticulate)
+library(Metrics)
+
+conflict_prefer("select", "dplyr")
+set.seed(42)
+
+learning_rate <- 0.0001
+sampling       <- 5000L
+device         <- "cpu"
+act            <- "relu"
+months         <- c("may", "june", "july", "aug", "sep", "oct")
+
+# Regularization parameters
+lambda.env <- 0.25; alpha.env <- 1
+lambda.sp  <- 0.2;  alpha.sp  <- 0.2
+lambda.bio <- 0.3;  alpha.bio <- 1
+
+for (month in months) {
+
+  Y   <- as.matrix(read_excel(paste0("Y_", month, ".xlsx")))
+  env <- as.matrix(read_excel("env_nofuncplant.xlsx"))
+  sp  <- as.matrix(read_excel("sp.xlsx"))
+
+  # Remove sites with zero abundance
+  ex <- which(rowSums(Y) == 0)
+  if(length(ex) > 0) {
+    Y   <- Y[-ex,]
+    env <- env[-ex,]
+    sp  <- sp[-ex,]
+  }
+
+  env <- scale(env)
+  XY  <- scale(sp)
+
+  # Fit sjSDM
+  model <- sjSDM(
+    Y = Y,
+    env = linear(env, formula = ~ ., lambda = lambda.env, alpha = alpha.env),
+    spatial = linear(XY, formula = ~ 0 + ., lambda = lambda.sp, alpha = alpha.sp),
+    biotic = bioticStruct(lambda = lambda.bio, alpha = alpha.bio, df = ncol(Y), reg_on_Cov = FALSE),
+    iter = 500L,
+    learning_rate = learning_rate,
+    sampling = sampling,
+    device = device,
+    control = sjSDMControl(RMSprop(weight_decay = 0.01), scheduler = 5L, early_stopping_training = 25L, lr_reduce_factor = 0.9),
+    se = TRUE
+  )
+
+  plot(model$history)
+
+  an <- anova(model, samples = sampling)
+
+  saveRDS(model, file = paste0(month, "_model_linearSP.RDS"))
+  saveRDS(an, file = paste0(month, "_model_an_linearSP.RDS"))
+
+  R2         <- Rsquared(model)
+  summary.p  <- summary(model)
+  co.env.spe <- cov2cor(getCov(model))
+
+  save(R2, summary.p, co.env.spe, file = paste0(month, "_model_result_linearSP.rdata"))
+
+  rm(model, an, R2, summary.p, co.env.spe)
+
+  # Cross-validation
+  sklearn <- reticulate::import("skmultilearn")
+  split   <- sklearn$model_selection$IterativeStratification(n_splits = 5L, order = 2L)
+  obj     <- split$split(env, Y)
+  splits  <- reticulate::iterate(obj)
+  CV      <- lapply(splits, function(sp) sp[[2]])
+
+  train_aucs      <- matrix(NA, length(CV), ncol(Y))
+  test_predictions <- list()
+
+  for (i in seq_along(CV)) {
+    indices_test <- CV[[i]]
+
+    model <- sjSDM(
+      Y = Y[-indices_test,],
+      env = linear(env[-indices_test,], formula = ~ ., lambda = lambda.env, alpha = alpha.env),
+      spatial = linear(XY[-indices_test,], formula = ~ 0 + ., lambda = lambda.sp, alpha = alpha.sp),
+      biotic = bioticStruct(lambda = lambda.bio, alpha = alpha.bio, df = ncol(Y), reg_on_Cov = FALSE),
+      iter = 300L,
+      learning_rate = learning_rate,
+      sampling = sampling,
+      device = device,
+      control = sjSDMControl(RMSprop(weight_decay = 0.0), scheduler = 5L, early_stopping_training = 25L, lr_reduce_factor = 0.9)
+    )
+
+    train_pred <- predict(model)
+    test_predictions[[i]] <- predict(model, newdata = env[indices_test,], SP = XY[indices_test,])
+    train_aucs[i, ] <- sapply(seq_len(ncol(train_pred)), function(j) Metrics::auc(Y[-indices_test, j], train_pred[, j]))
+  }
+
+  pred     <- do.call(rbind, test_predictions)
+  test_obs <- do.call(rbind, lapply(CV, function(ind) Y[ind,]))
+  train_aucs <- colMeans(train_aucs, na.rm = TRUE)
+  test_aucs  <- sapply(seq_len(ncol(test_obs)), function(i) Metrics::auc(test_obs[, i], pred[, i]))
+
+  save(train_aucs, test_aucs, file = paste0(month, "_AUC_linearSP.rdata"))
+}
