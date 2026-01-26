@@ -1,4 +1,5 @@
-This is a brief description of the main code used in the QLHG metabarcoding project
+This is a brief description of the main code used in the QLHG metabarcoding project.
+00.Deeplearning_model: This folder mainly contains instructions for using deep learning models to filter non insect barcode sequences and the models used in the article. 
 
 01.Usearch_pipeline: This folder contains the analysis process from raw metabarcode sequencing data to OTU reads.
 
